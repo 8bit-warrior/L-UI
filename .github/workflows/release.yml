@@ -19,8 +19,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
-      - run: go mod download
+          cache: false
+      - run: go mod tidy
       - run: test -z "$(gofmt -l cmd internal tests)"
       - run: go vet ./...
       - run: go test ./... -v
@@ -50,8 +50,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
-      - run: go mod download
+          cache: false
+      - run: go mod tidy
       - name: Determine version
         id: version
         shell: bash
