@@ -1,25 +1,73 @@
 name: CI
+
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: '3.11'
-      - name: Compile
-        run: python -m py_compile lui.py src/*.py tests/*.py
+          go-version: '1.23.x'
+          cache: true
+      - name: Download modules
+        run: go mod download
+      - name: Format
+        run: test -z "$(gofmt -l cmd internal tests)"
+      - name: Vet
+        run: go vet ./...
       - name: Unit tests
-        run: python -m unittest discover -s tests -v
+        run: go test ./... -v
       - name: Route integration
-        run: chmod +x tests/fake_xray.py && python tests/route_integration.py
-      - name: Smoke self-check
+        run: |
+          go build -o /tmp/fake-xray ./tests/fake_xray.go
+          LUI_FAKE_XRAY_BIN=/tmp/fake-xray go test ./internal/app -run TestRealRouteTestIntegration -v
+      - name: Build amd64
         env:
-          LUI_HOME: /tmp/lui-ci
-          LUI_BIN_DIR: /tmp/lui-ci/bin
-          LUI_LOG_DIR: /tmp/lui-ci/logs
-        run: python lui.py self-check
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/l-ui ./cmd/l-ui
+      - name: Self-check smoke
+        run: |
+          LUI_HOME="$RUNNER_TEMP/lui" LUI_BIN_DIR="$RUNNER_TEMP/lui-bin" /tmp/l-ui self-check
+      - name: Shell syntax
+        run: sh -n install.sh
+
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            name: amd64
+          - goarch: arm64
+            name: arm64
+          - goarch: arm
+            goarm: '7'
+            name: armv7
+          - goarch: '386'
+            name: '386'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - run: go mod download
+      - name: Cross build ${{ matrix.name }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go build -trimpath -ldflags="-s -w" -o "l-ui-linux-${{ matrix.name }}" ./cmd/l-ui
