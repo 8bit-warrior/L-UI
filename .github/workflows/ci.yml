@@ -12,7 +12,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile
-        run: python -m py_compile lui.py src/*.py
+        run: python -m py_compile lui.py src/*.py tests/*.py
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Route integration
+        run: chmod +x tests/fake_xray.py && python tests/route_integration.py
       - name: Smoke self-check
         env:
           LUI_HOME: /tmp/lui-ci
