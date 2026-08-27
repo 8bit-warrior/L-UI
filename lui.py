@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
-"""L-UI launcher.
-
-The implementation is split into ordered source fragments under ``src/`` so the
-project stays readable while still behaving as one panel-less terminal script.
-All fragments execute in this module's single global namespace.
-"""
+"""L-UI launcher for ordered source fragments."""
 from __future__ import annotations
 
 import __future__
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent
-_PARTS = [
-    _ROOT / "src" / "lui_part_01.py",
-    _ROOT / "src" / "lui_part_02.py",
-    _ROOT / "src" / "lui_part_03.py",
-    _ROOT / "src" / "lui_part_04.py",
-    _ROOT / "src" / "lui_part_05.py",
-]
+_PARTS = sorted((_ROOT / "src").glob("part_*.py"))
+if not _PARTS:
+    raise RuntimeError("L-UI source fragments are missing")
 
 for _part in _PARTS:
-    if not _part.is_file():
-        raise RuntimeError(f"L-UI source fragment missing: {_part}")
     _source = _part.read_text(encoding="utf-8")
     exec(
         compile(
