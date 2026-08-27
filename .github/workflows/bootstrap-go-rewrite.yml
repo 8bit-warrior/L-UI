@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  BOOTSTRAP_MARKER: go-single-binary-bootstrap
-
 jobs:
   unpack:
     if: "github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'bootstrap: Go single-binary rewrite'"
@@ -30,24 +27,23 @@ jobs:
           rm -f lui.py
           rm -rf src
           rm -f tests/test_lui.py tests/fake_xray.py tests/route_integration.py
-          tar -xzf /tmp/lui.tgz
+          tar -xzf /tmp/lui.tgz --exclude='.github/workflows' --exclude='.github/workflows/*'
           rm -rf .bootstrap
-          rm -f .github/workflows/bootstrap-go-rewrite.yml
       - name: Verify extracted tree before commit
         shell: bash
         run: |
           set -euo pipefail
           test -f cmd/l-ui/main.go
           test -f internal/app/menu.go
-          test -f .github/workflows/ci.yml
-          test -f .github/workflows/release.yml
+          test -f internal/app/migrate.go
+          test -f tests/fake_xray.go
           sh -n install.sh
-      - name: Commit Go rewrite
+      - name: Commit Go source rewrite
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'release: v0.3.0 Go single-binary rewrite'
+          git add -A -- ':!.github/workflows'
+          git commit -m 'Go single-binary source rewrite'
           git push origin HEAD:main
