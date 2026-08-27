@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release: v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - run: go mod download
+      - run: test -z "$(gofmt -l cmd internal tests)"
+      - run: go vet ./...
+      - run: go test ./... -v
+      - name: Route integration
+        run: |
+          go build -o /tmp/fake-xray ./tests/fake_xray.go
+          LUI_FAKE_XRAY_BIN=/tmp/fake-xray go test ./internal/app -run TestRealRouteTestIntegration -v
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            name: amd64
+          - goarch: arm64
+            name: arm64
+          - goarch: arm
+            goarm: '7'
+            name: armv7
+          - goarch: '386'
+            name: '386'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - run: go mod download
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="$(printf '%s' '${{ github.event.head_commit.message }}' | sed -n 's/^release: \(v[^ ]*\).*/\1/p')"
+          fi
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Build static Linux binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        shell: bash
+        run: |
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.commit=$GITHUB_SHA -X main.buildDate=$DATE" -o "l-ui-linux-${{ matrix.name }}" ./cmd/l-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: l-ui-${{ matrix.name }}
+          path: l-ui-linux-${{ matrix.name }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="$(printf '%s' '${{ github.event.head_commit.message }}' | sed -n 's/^release: \(v[^ ]*\).*/\1/p')"
+          fi
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Checksums
+        run: cd dist && sha256sum l-ui-linux-* > sha256sums.txt
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes
+          gh release upload "$VERSION" dist/l-ui-linux-* dist/sha256sums.txt --repo "$GITHUB_REPOSITORY" --clobber
