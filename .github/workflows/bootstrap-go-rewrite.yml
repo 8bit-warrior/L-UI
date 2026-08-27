@@ -1,0 +1,53 @@
+name: Bootstrap Go rewrite
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BOOTSTRAP_MARKER: go-single-binary-bootstrap
+
+jobs:
+  unpack:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'bootstrap: Go single-binary rewrite'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct verified source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/part* > /tmp/lui.b64
+          base64 -d /tmp/lui.b64 > /tmp/lui.tgz
+          echo 'e8b2c318a0fccee893f59035dea192767911a8675fcecc1b944f212f2af54d3a  /tmp/lui.tgz' | sha256sum -c -
+          rm -rf cmd internal
+          rm -f lui.py
+          rm -rf src
+          rm -f tests/test_lui.py tests/fake_xray.py tests/route_integration.py
+          tar -xzf /tmp/lui.tgz
+          rm -rf .bootstrap
+          rm -f .github/workflows/bootstrap-go-rewrite.yml
+      - name: Verify extracted tree before commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f cmd/l-ui/main.go
+          test -f internal/app/menu.go
+          test -f .github/workflows/ci.yml
+          test -f .github/workflows/release.yml
+          sh -n install.sh
+      - name: Commit Go rewrite
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'release: v0.3.0 Go single-binary rewrite'
+          git push origin HEAD:main
