@@ -1,10 +1,70 @@
 # L-UI
 
-L-UI 是一个**无 Web 面板、Xray-only** 的终端管理器。目标是把 3x-ui 中最常用的入站、出站、路由、客户端管理转换成纯终端菜单，同时保留数据迁移和真实连通性测试能力。
+L-UI 是一个面向 Linux 的轻量级 Xray 终端管理器，不提供 Web 面板。目标是保留 3x-ui 常用的入站、出站、路由、客户端、订阅、迁移和内核管理能力，同时把运行环境压缩为 **L-UI 单文件 + Xray 内核**。
 
-## 3x-ui 对照基准
+## 运行时依赖
 
-L-UI 的“新增出站”协议顺序直接跟随 3x-ui 当前界面的 `OutboundProtocols`：
+L-UI v0.3.0 起使用 Go 重写并发布静态二进制。目标机器运行 L-UI 本体时不需要安装：
+
+- Python / pip
+- Go
+- Node.js
+- jq
+- sqlite3
+- curl
+- qrencode
+- glibc
+
+3x-ui SQLite 数据读取、HTTP/HTTPS 请求、SOCKS5 路由测试和终端二维码均由 L-UI 自身实现。Xray 仍然是实际代理核心，因此需要单独安装 Xray；L-UI 的内核管理菜单可以完成安装与切换。
+
+> 安装脚本本身需要一个下载工具：`curl`、`wget` 或 BusyBox `wget` 三者之一。安装完成后，L-UI 运行时不依赖这些工具。
+
+## 支持平台
+
+Release 默认提供以下静态 Linux 二进制：
+
+| Linux 架构 | Release 文件 | 常见 `uname -m` |
+| --- | --- | --- |
+| amd64 | `l-ui-linux-amd64` | `x86_64`, `amd64` |
+| arm64 | `l-ui-linux-arm64` | `aarch64`, `arm64` |
+| armv7 | `l-ui-linux-armv7` | `armv7l`, `armv7` |
+| 386 | `l-ui-linux-386` | `i386`, `i486`, `i586`, `i686` |
+
+构建使用 `CGO_ENABLED=0`，因此 L-UI 本体不依赖目标系统的 glibc/musl。服务管理依次支持 systemd、OpenRC、SysV init；无法识别 init 系统时可退化为 PID 方式直接管理 Xray 进程。
+
+## 安装
+
+Root 安装到 `/usr/local/bin/l-ui`：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/8bit-warrior/L-UI/main/install.sh | sh
+```
+
+也可以使用：
+
+```sh
+wget -qO- https://raw.githubusercontent.com/8bit-warrior/L-UI/main/install.sh | sh
+```
+
+非 root 用户默认安装到 `$HOME/.local/bin/l-ui`。安装脚本会自动识别 CPU 架构，从最新 GitHub Release 下载对应文件，并在目标系统具有 `sha256sum` 时校验 Release 提供的 `sha256sums.txt`。
+
+安装完成后：
+
+```sh
+l-ui
+```
+
+## 核心功能
+
+### 入站管理
+
+当前菜单支持：VLESS、VMess、Trojan、Shadowsocks、WireGuard、Hysteria、HTTP、Mixed、Tunnel、AmneziaWG；包括新增、JSON 编辑、启停、克隆、删除、客户端处理、分享链接、Base64 订阅和二维码。
+
+MTProto 和 TUN 没有作为 L-UI/Xray-only 的新增入站接管：当前 3x-ui 的 MTProto 使用独立 MTG 组件；TUN 也不作为当前 Xray-only 新建入站处理。
+
+### 出站管理
+
+“新增出站”的协议顺序与当前 3x-ui 对齐：
 
 1. `freedom`
 2. `blackhole`
@@ -19,67 +79,100 @@ L-UI 的“新增出站”协议顺序直接跟随 3x-ui 当前界面的 `Outbou
 11. `http`
 12. `loopback`
 
-不是根据 Xray 文档自行扩充。
+VLESS 使用当前 Xray/3x-ui 的扁平 `settings.address/port/id/flow/encryption` 结构；VMess 保留 `settings.vnext`。默认出站与 3x-ui 一致：**出站数组第一项就是默认出站**，设置默认值时通过调整出站顺序完成。
 
-## 安装
+出站订阅支持 VMess、VLESS、Trojan、Shadowsocks、Hysteria2 和 WireGuard 常见 URI，以及原始 JSON outbounds。订阅 URL 默认拒绝私网、回环、链路本地、多播和未指定地址，重定向也重新检查；单次订阅响应最大 8 MiB。确有内网订阅需求时可在订阅设置中显式开启 `allow_private`。
 
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/8bit-warrior/L-UI/main/install.sh)
+### 路由管理与真实访问测试
+
+路由规则支持 domain、IP、目标端口、`sourceIP`、sourcePort、network、protocol、inboundTag、user、outboundTag/balancerTag 等字段，并在生成 Xray 配置时剔除 L-UI 内部启停字段。
+
+真实路由测试不是只计算“理论命中哪个出口”。L-UI 会：
+
+1. 生成临时 Xray 配置；
+2. 创建仅监听 `127.0.0.1` 的临时 SOCKS 入站；
+3. 用实际 Xray `-test` 校验该临时配置；
+4. 启动临时 Xray；
+5. 使用 L-UI 内置 SOCKS5 客户端完成完整 HTTP/HTTPS 请求；
+6. 从临时 Xray access log 读取实际命中的 outbound tag；
+7. 输出 HTTP 状态、整个请求延迟、连接耗时和 TTFB；
+8. 立即结束临时 Xray，不修改正式实例。
+
+因此目标机无需 `curl`。
+
+### 客户端与导出
+
+支持客户端新增/批量新增、启停、编辑、分组、绑定/解绑入站、外部链接、导入导出，以及 VLESS/Trojan/VMess/Shadowsocks 标准分享链接和 Base64 订阅。二维码由内置 Go 库直接在终端渲染，不需要 `qrencode`。
+
+高级协议如果没有稳定、通用的标准分享 URI，可使用 Xray JSON 导出。
+
+### 3x-ui 数据迁移
+
+可读取当前/兼容版本 3x-ui 的 SQLite `.db`，并处理常见的：
+
+- inbounds
+- clients / client_inbounds
+- client_groups
+- client_external_links
+- `xrayTemplateConfig` 中的 outbounds、routing、DNS、policy、stats 等
+- outbound_subscriptions
+
+也支持 SQLite SQL 文本 `.dump`。如果文件是 PostgreSQL 原生二进制 `PGDMP`，L-UI 会明确拒绝，因为它不是 SQLite 数据；应先通过 3x-ui 的 Migration 功能得到跨数据库迁移用 SQLite `.db` 再导入。
+
+导入前会生成 L-UI 回滚备份，并提供跳过、覆盖、自动重命名三种冲突策略。
+
+## 数据位置
+
+root 模式默认：
+
+```text
+/etc/l-ui/state.json
+/etc/l-ui/config.json
+/etc/l-ui/backups/
+/var/log/l-ui/access.log
+/var/log/l-ui/error.log
+/usr/local/lib/l-ui/xray
+```
+
+旧 Python 版和 Go 版沿用同一 `schema=1` 状态格式，因此正常升级时会继续读取现有 `/etc/l-ui/state.json`，不要求重新配置。
+
+## 命令行
+
+```text
 l-ui
-```
-
-依赖：Python 3.9+、curl、unzip、CA certificates。安装脚本支持 Debian/Ubuntu、Fedora/RHEL、Alpine、Arch、openSUSE 的基础依赖安装；服务管理当前使用 systemd。
-
-## 主要功能
-
-- Xray 内核安装/切换：最新 release（包含 prerelease）、固定兼容版 `v26.6.27`、自定义版本存在性验证；架构匹配、SHA256（release 提供 digest 时）与可执行版本验证、当前配置验证、失败回滚。
-- 入站：列表、新增、JSON 编辑、启停、详情、分享链接、二维码、订阅导出、克隆、删除、批量删除、JSON 导入导出。
-- 出站：3x-ui 对应 12 种协议、增删改、排序、默认出站、导入导出、单个/全部真实访问测试；出站订阅支持 CRUD、预览、刷新、排序、前置/后置、Tag 前缀、私网和 TLS 校验选项。
-- 路由：基础路由、规则增删改、启停、排序、导入导出、真实路由测试。
-- 客户端：CRUD、批量创建/调整、启停、分组、绑定/解绑入站、外部链接、导入导出、分享链接。
-- 3x-ui 迁移：读取 SQLite `.db` 和 3x-ui SQLite migration `.dump`，导入入站、客户端、关联关系、客户端分组、客户端外部链接、出站订阅，以及 Xray template 中的出站/路由/DNS 等；原生 PostgreSQL binary dump 会明确拒绝并要求使用 3x-ui Migration 导出为 `.db`。
-- L-UI 自身完整备份/恢复。
-- systemd 服务管理、Xray 配置检查、日志查看。
-
-## 路由测试与 3x-ui 的差异
-
-3x-ui 的 Route Tester 是规则模拟，返回会匹配哪个 outbound。L-UI 的 `真实路由访问测试` 会：
-
-1. 用当前 outbounds + routing 生成一个临时 Xray 配置。
-2. 在本机随机端口启动临时 SOCKS 入站。
-3. 使用 `curl --socks5-hostname` 真正访问指定 `http://` / `https://` URL。
-4. 从 Xray access log 读取实际命中的 outbound tag。
-5. 输出 HTTP 状态、整个请求 `time_total`、连接耗时和 TTFB。`time_total` 覆盖 SOCKS 握手、代理侧域名解析/连接、TLS、HTTP 以及响应接收全过程。
-6. 测试完成立即终止临时 Xray，不修改正式实例。
-
-```bash
-l-ui route-test https://www.google.com/generate_204
-l-ui route-test https://example.com my-inbound-tag
-```
-
-## 数据路径
-
-- 状态：`/etc/l-ui/state.json`
-- 生成配置：`/etc/l-ui/config.json`
-- 内核：`/usr/local/lib/l-ui/xray`
-- 日志：`/var/log/l-ui/`
-- 备份：`/etc/l-ui/backups/`
-- systemd：`l-ui-xray.service`
-
-测试/非 root 环境可以使用 `LUI_HOME`、`LUI_BIN_DIR`、`LUI_LOG_DIR`、`LUI_XRAY_BIN` 重定向路径。
-
-## 自检
-
-```bash
+l-ui version
+l-ui config
+l-ui check
+l-ui route-test URL [INBOUND_TAG]
+l-ui analyze-3xui FILE
 l-ui self-check
-python3 -m unittest discover -s tests -v
 ```
 
-自检覆盖状态结构、配置生成、Xray `-test`（安装内核后）、curl 可用性和 SQLite 支持。测试覆盖 3x-ui 出站协议顺序、禁用规则、客户端注入、access log 出口解析、3x-ui SQLite 数据迁移、SQL dump 识别、VLESS/Hysteria2 出站 URI、Base64 订阅和订阅前置/后置注入；另有 SOCKS5 + 完整 HTTP 路由集成测试。
+## 构建与 Release
 
-## 已知边界
+仓库源码使用 Go。目标设备**不需要 Go**；GitHub Actions 负责交叉编译静态二进制。
 
-- L-UI 只管理 Xray。3x-ui 的 MTProto 依赖独立 `mtg-multi` 子进程，因此不伪装成 Xray 功能；旧 `tun` 也不会作为新建入站暴露。
-- WireGuard/AmneziaWG、复杂 XHTTP/REALITY 等高级字段可用菜单中的 JSON 编辑完整表达。
-- 原生 PostgreSQL `pg_dump -Fc` 文件不是 SQLite，L-UI 不直接解释；请从 3x-ui 的 Migration 功能取得 SQLite `.db`。
-- “流量重置”当前以重启 Xray 运行时统计实现；L-UI v0.2.0 不维护 3x-ui 那套持久化流量数据库。
+本地构建示例：
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags='-s -w' -o l-ui ./cmd/l-ui
+```
+
+CI 会执行格式检查、`go vet`、单元测试、真实 SOCKS5 路由集成测试、静态 amd64 冒烟测试，以及 amd64/arm64/armv7/386 交叉编译。Release 工作流发布四种架构文件和 `sha256sums.txt`。
+
+## 当前边界
+
+- L-UI 是终端管理器，不提供 Web UI，也不依赖 3x-ui 运行时。
+- 当前“重置流量”指重启 Xray 运行时统计；尚未实现 3x-ui 那种长期持久化流量数据库，因此不要把它当作完整的长期流量计费系统。
+- Xray 配置最终仍由所安装的 Xray 内核校验；某个协议字段是否可用取决于对应 Xray 版本。
+
+## 开发自检
+
+```sh
+go test ./...
+go vet ./...
+CGO_ENABLED=0 go build ./cmd/l-ui
+```
+
+真实路由集成测试使用仓库内的 Go fake-Xray 实现实际 SOCKS5 CONNECT 与 TCP 转发，不只是 mock 返回值。正式 Xray release 的下载/安装仍由目标环境或 GitHub 网络执行；离线开发环境无法替代对官方 release 二进制的在线下载验证。

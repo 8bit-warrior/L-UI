@@ -1,40 +1,92 @@
 #!/bin/sh
 set -eu
-REPO="8bit-warrior/L-UI"
-BASE="https://raw.githubusercontent.com/${REPO}/main"
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "请使用 root 运行安装脚本" >&2
-  exit 1
+REPO="8bit-warrior/L-UI"
+VERSION="${LUI_VERSION:-latest}"
+
+say() { printf '%s\n' "$*"; }
+die() { printf '错误: %s\n' "$*" >&2; exit 1; }
+
+case "$(uname -s 2>/dev/null || true)" in
+  Linux) ;;
+  *) die "当前仅支持 Linux" ;;
+esac
+
+case "$(uname -m 2>/dev/null || true)" in
+  x86_64|amd64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  armv7l|armv7|armhf) ARCH="armv7" ;;
+  i386|i486|i586|i686|x86) ARCH="386" ;;
+  *) die "暂不支持的 CPU 架构: $(uname -m 2>/dev/null || echo unknown)" ;;
+esac
+
+if [ "$(id -u)" -eq 0 ]; then
+  DEST="${LUI_INSTALL_PATH:-/usr/local/bin/l-ui}"
+else
+  DEST="${LUI_INSTALL_PATH:-$HOME/.local/bin/l-ui}"
+  mkdir -p "$(dirname "$DEST")"
+  say "非 root 安装：程序将安装到 $DEST；服务管理和 /etc/l-ui 模式需要 root。"
 fi
 
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
-install_deps() {
-  if need_cmd apt-get; then apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl unzip ca-certificates
-  elif need_cmd dnf; then dnf install -y python3 curl unzip ca-certificates
-  elif need_cmd yum; then yum install -y python3 curl unzip ca-certificates
-  elif need_cmd apk; then apk add --no-cache python3 curl unzip ca-certificates
-  elif need_cmd pacman; then pacman -Sy --noconfirm python curl unzip ca-certificates
-  elif need_cmd zypper; then zypper --non-interactive install python3 curl unzip ca-certificates
-  else echo "不支持的包管理器，请手动安装 python3 curl unzip ca-certificates" >&2; exit 1
+ASSET="l-ui-linux-$ARCH"
+if [ "$VERSION" = "latest" ]; then
+  BASE="https://github.com/$REPO/releases/latest/download"
+else
+  case "$VERSION" in v*) : ;; *) VERSION="v$VERSION" ;; esac
+  BASE="https://github.com/$REPO/releases/download/$VERSION"
+fi
+URL="$BASE/$ASSET"
+SUMURL="$BASE/sha256sums.txt"
+TMPDIR="${TMPDIR:-/tmp}/l-ui-install-$$"
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+BIN="$TMPDIR/$ASSET"
+SUMS="$TMPDIR/sha256sums.txt"
+
+download() {
+  url="$1"; out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --connect-timeout 15 --retry 2 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" "$url"
+  elif command -v busybox >/dev/null 2>&1 && busybox wget --help >/dev/null 2>&1; then
+    busybox wget -O "$out" "$url"
+  else
+    die "缺少下载工具：需要 curl、wget 或带 wget applet 的 BusyBox 之一。L-UI 本体安装后不依赖这些工具。"
   fi
 }
-install_deps
-python3 - <<'PYVER'
-import sys
-if sys.version_info < (3, 9):
-    raise SystemExit("L-UI requires Python 3.9 or newer")
-PYVER
-mkdir -p /usr/local/lib/l-ui/src /etc/l-ui /var/log/l-ui
-curl -fL "${BASE}/lui.py" -o /usr/local/lib/l-ui/lui.py
-for part in part_001.py part_002.py part_003.py part_004.py part_005.py part_006.py part_007.py part_008.py part_009.py part_010.py part_011.py part_012.py part_013.py part_014.py part_015.py part_016.py part_017.py; do
-  curl -fL "${BASE}/src/${part}" -o "/usr/local/lib/l-ui/src/${part}"
-done
-chmod 0755 /usr/local/lib/l-ui/lui.py
-cat >/usr/local/bin/l-ui <<'EOF'
-#!/bin/sh
-exec python3 /usr/local/lib/l-ui/lui.py "$@"
-EOF
-chmod 0755 /usr/local/bin/l-ui
-echo "L-UI 已安装。运行: l-ui"
-if [ -t 0 ]; then exec /usr/local/bin/l-ui; fi
+
+say "下载 $ASSET ..."
+download "$URL" "$BIN"
+chmod 0755 "$BIN"
+
+if download "$SUMURL" "$SUMS" 2>/dev/null; then
+  EXPECTED="$(awk -v f="$ASSET" '$2==f || $2=="*"f {print $1; exit}' "$SUMS" 2>/dev/null || true)"
+  if [ -n "$EXPECTED" ]; then
+    ACTUAL=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      ACTUAL="$(sha256sum "$BIN" | awk '{print $1}')"
+    elif command -v busybox >/dev/null 2>&1; then
+      ACTUAL="$(busybox sha256sum "$BIN" 2>/dev/null | awk '{print $1}')"
+    fi
+    if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+      die "SHA256 校验失败"
+    fi
+    [ -n "$ACTUAL" ] && say "SHA256 校验通过。"
+  fi
+fi
+
+"$BIN" version >/dev/null 2>&1 || die "下载的 L-UI 二进制无法在当前系统运行"
+mkdir -p "$(dirname "$DEST")"
+OLD="$DEST.old"
+if [ -f "$DEST" ]; then cp "$DEST" "$OLD" 2>/dev/null || true; fi
+if ! cp "$BIN" "$DEST"; then
+  [ -f "$OLD" ] && mv "$OLD" "$DEST"
+  die "写入 $DEST 失败"
+fi
+chmod 0755 "$DEST"
+rm -f "$OLD"
+
+say "L-UI 已安装: $DEST"
+"$DEST" version
+say "运行: $DEST"
