@@ -17,9 +17,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
-      - name: Download modules
-        run: go mod download
+          cache: false
+      - name: Resolve modules
+        run: go mod tidy
       - name: Format
         run: test -z "$(gofmt -l cmd internal tests)"
       - name: Vet
@@ -62,8 +62,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23.x'
-          cache: true
-      - run: go mod download
+          cache: false
+      - run: go mod tidy
       - name: Cross build ${{ matrix.name }}
         env:
           CGO_ENABLED: '0'
