@@ -1,0 +1,209 @@
+name: Apply 3x-ui import repair
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "github.event.head_commit.message == 'chore: run 3x-ui import repair'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch importer and diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          migrate = Path('internal/app/migrate.go')
+          text = migrate.read_text()
+          start_marker = '\t\t\tif rt, ok := templ["routing"].(map[string]any); ok {'
+          end_marker = '\t\t\tif templ["dns"] != nil {'
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          new_block = '''\t\t\tif rt, ok := templ["routing"].(map[string]any); ok {
+\t\t\t\tif s(rt["domainStrategy"]) != "" {
+\t\t\t\t\tst.Routing["domainStrategy"] = rt["domainStrategy"]
+\t\t\t\t}
+\t\t\t\trules := RoutingRules(st)
+\t\t\t\tapiTag := ""
+\t\t\t\tif apiCfg, ok := templ["api"].(map[string]any); ok {
+\t\t\t\t\tapiTag = s(apiCfg["tag"])
+\t\t\t\t}
+\t\t\t\tfor _, v := range a(rt["rules"]) {
+\t\t\t\t\tif rr, ok := v.(map[string]any); ok {
+\t\t\t\t\t\t// 3x-ui injects an internal control-plane route such as api -> api.
+\t\t\t\t\t\t// L-UI does not run 3x-ui's API application/inbound, so carrying this
+\t\t\t\t\t\t// rule over creates a dangling outboundTag and makes xray -test fail.
+\t\t\t\t\t\tif apiTag != "" && s(rr["outboundTag"]) == apiTag && contains(strSlice(rr["inboundTag"]), apiTag) {
+\t\t\t\t\t\t\twarn("已忽略 3x-ui 内部 API 路由规则（L-UI 不使用 3x-ui API 控制面）")
+\t\t\t\t\t\t\tcontinue
+\t\t\t\t\t\t}
+\t\t\t\t\t\tcp := DeepCopy(rr)
+\t\t\t\t\t\tcp["_lui_enabled"] = b(rr["enabled"], true)
+\t\t\t\t\t\tcp["_lui_source"] = "3x-ui"
+\t\t\t\t\t\tdelete(cp, "enabled")
+\t\t\t\t\t\trules = append(rules, cp)
+\t\t\t\t\t\treport["routing_rules"] = i(report["routing_rules"]) + 1
+\t\t\t\t\t}
+\t\t\t\t}
+\t\t\t\tSetRoutingRules(st, rules)
+\t\t\t\tif xs := a(rt["balancers"]); len(xs) > 0 {
+\t\t\t\t\tst.Routing["balancers"] = DeepCopy(xs)
+\t\t\t\t}
+\t\t\t}
+'''
+          text = text[:start] + new_block + text[end:]
+          migrate.write_text(text)
+
+          xray = Path('internal/app/xray.go')
+          text = xray.read_text()
+          start = text.index('func ValidateXrayConfig(p Paths, path string) (bool, string) {')
+          end = text.index('\nfunc githubGetJSON', start)
+          new_func = '''func ValidateXrayConfig(p Paths, path string) (bool, string) {
+\tif _, err := os.Stat(p.XrayBin); err != nil {
+\t\tdata, e := os.ReadFile(path)
+\t\tif e != nil {
+\t\t\treturn false, e.Error()
+\t\t}
+\t\tvar x any
+\t\tif e = json.Unmarshal(data, &x); e != nil {
+\t\t\treturn false, e.Error()
+\t\t}
+\t\treturn true, "仅完成 JSON 结构校验（Xray 尚未安装）"
+\t}
+\tfailures := []string{}
+\tseen := map[string]bool{}
+\tfor _, args := range [][]string{{"run", "-test", "-config", path}, {"-test", "-config", path}} {
+\t\tcode, out := commandTimeout(20*time.Second, p.XrayBin, args...)
+\t\tout = strings.TrimSpace(out)
+\t\tif code == 0 {
+\t\t\treturn true, out
+\t\t}
+\t\tif out != "" && !seen[out] {
+\t\t\tseen[out] = true
+\t\t\tif len(out) > 4096 {
+\t\t\t\tout = out[:4096] + "...（输出已截断）"
+\t\t\t}
+\t\t\tfailures = append(failures, out)
+\t\t}
+\t}
+\tif len(failures) > 0 {
+\t\treturn false, "Xray -test 失败:\\n" + strings.Join(failures, "\\n---\\n")
+\t}
+\treturn false, "Xray -test 失败（Xray 未返回错误信息）"
+}
+'''
+          text = text[:start] + new_func + text[end:]
+          xray.write_text(text)
+
+          test = Path('internal/app/import_sanitize_test.go')
+          test.write_text(r'''package app
+
+import (
+    "database/sql"
+    "encoding/json"
+    "os"
+    "path/filepath"
+    "strings"
+    "testing"
+)
+
+func TestConvert3xuiFiltersInternalAPIRoute(t *testing.T) {
+    db, err := sql.Open("sqlite", ":memory:")
+    if err != nil || db.Ping() != nil {
+        t.Skip("sqlite driver unavailable")
+    }
+    defer db.Close()
+    if _, err = db.Exec(`CREATE TABLE settings (key TEXT, value TEXT)`); err != nil {
+        t.Fatal(err)
+    }
+    templ := map[string]any{
+        "api": map[string]any{"tag": "api", "services": []any{"HandlerService", "StatsService"}},
+        "outbounds": []any{
+            map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{"domainStrategy": "AsIs"}},
+            map[string]any{"tag": "blocked", "protocol": "blackhole", "settings": map[string]any{}},
+        },
+        "routing": map[string]any{
+            "domainStrategy": "AsIs",
+            "rules": []any{
+                map[string]any{"type": "field", "inboundTag": []any{"api"}, "outboundTag": "api"},
+                map[string]any{"type": "field", "domain": []any{"full:example.com"}, "outboundTag": "direct", "enabled": true},
+            },
+        },
+    }
+    raw, _ := json.Marshal(templ)
+    if _, err = db.Exec(`INSERT INTO settings(key,value) VALUES('xrayTemplateConfig', ?)`, string(raw)); err != nil {
+        t.Fatal(err)
+    }
+    st := DefaultState(testPaths(t))
+    next, report, err := Convert3xui(db, st, "overwrite")
+    if err != nil {
+        t.Fatal(err)
+    }
+    rules := RoutingRules(next)
+    if len(rules) != 1 {
+        t.Fatalf("expected only user routing rule, got %d: %#v", len(rules), rules)
+    }
+    if got := s(rules[0]["outboundTag"]); got != "direct" {
+        t.Fatalf("unexpected remaining outboundTag: %q", got)
+    }
+    if i(report["routing_rules"]) != 1 {
+        t.Fatalf("report routing_rules=%v", report["routing_rules"])
+    }
+    warnings := a(report["warnings"])
+    if len(warnings) == 0 || !strings.Contains(s(warnings[0]), "内部 API") {
+        t.Fatalf("expected internal API warning, got %#v", warnings)
+    }
+    cfg, err := BuildConfig(next)
+    if err != nil {
+        t.Fatal(err)
+    }
+    for _, v := range a(m(cfg["routing"])["rules"]) {
+        rr := m(v)
+        if s(rr["outboundTag"]) == "api" || contains(strSlice(rr["inboundTag"]), "api") {
+            t.Fatalf("3x-ui control-plane route leaked into Xray config: %#v", rr)
+        }
+    }
+}
+
+func TestValidateXrayConfigReturnsDiagnostic(t *testing.T) {
+    p := testPaths(t)
+    if err := os.MkdirAll(filepath.Dir(p.XrayBin), 0755); err != nil {
+        t.Fatal(err)
+    }
+    if err := os.WriteFile(p.XrayBin, []byte("#!/bin/sh\necho 'fixture-xray-diagnostic' >&2\nexit 23\n"), 0755); err != nil {
+        t.Fatal(err)
+    }
+    cfg := filepath.Join(p.Home, "candidate.json")
+    if err := os.WriteFile(cfg, []byte("{}\n"), 0600); err != nil {
+        t.Fatal(err)
+    }
+    ok, msg := ValidateXrayConfig(p, cfg)
+    if ok {
+        t.Fatal("expected validation failure")
+    }
+    if !strings.Contains(msg, "fixture-xray-diagnostic") {
+        t.Fatalf("diagnostic was lost: %q", msg)
+    }
+}
+''')
+          PY
+          gofmt -w internal/app/migrate.go internal/app/xray.go internal/app/import_sanitize_test.go
+          git diff --check
+      - name: Commit repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add internal/app/migrate.go internal/app/xray.go internal/app/import_sanitize_test.go
+          git commit -m 'fix: sanitize 3x-ui control-plane routes on import'
+          git push origin HEAD:main
