@@ -26,6 +26,16 @@ jobs:
         run: go vet ./...
       - name: Unit tests
         run: go test ./... -v
+      - name: 3x-ui import compatibility with Xray v26.6.27
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/XTLS/Xray-core/releases/download/v26.6.27/Xray-linux-64.zip -o /tmp/xray.zip
+          echo 'b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf  /tmp/xray.zip' | sha256sum -c -
+          mkdir -p /tmp/xray-v26.6.27
+          unzip -q /tmp/xray.zip -d /tmp/xray-v26.6.27
+          chmod +x /tmp/xray-v26.6.27/xray
+          LUI_REAL_XRAY_BIN=/tmp/xray-v26.6.27/xray go test ./internal/app -run TestImported3xuiConfigPassesRealXray -v
       - name: Route integration
         run: |
           go build -o /tmp/fake-xray ./tests/fake_xray.go
