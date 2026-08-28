@@ -77,13 +77,26 @@ func ValidateXrayConfig(p Paths, path string) (bool, string) {
 		}
 		return true, "仅完成 JSON 结构校验（Xray 尚未安装）"
 	}
+	failures := []string{}
+	seen := map[string]bool{}
 	for _, args := range [][]string{{"run", "-test", "-config", path}, {"-test", "-config", path}} {
 		code, out := commandTimeout(20*time.Second, p.XrayBin, args...)
+		out = strings.TrimSpace(out)
 		if code == 0 {
-			return true, strings.TrimSpace(out)
+			return true, out
+		}
+		if out != "" && !seen[out] {
+			seen[out] = true
+			if len(out) > 4096 {
+				out = out[:4096] + "...（输出已截断）"
+			}
+			failures = append(failures, out)
 		}
 	}
-	return false, "Xray -test 失败"
+	if len(failures) > 0 {
+		return false, "Xray -test 失败:\n" + strings.Join(failures, "\n---\n")
+	}
+	return false, "Xray -test 失败（Xray 未返回错误信息）"
 }
 
 func githubGetJSON(path string, out any) error {

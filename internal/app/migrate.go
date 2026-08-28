@@ -439,10 +439,23 @@ func Convert3xui(db *sql.DB, base *State, conflict string) (*State, map[string]a
 					st.Routing["domainStrategy"] = rt["domainStrategy"]
 				}
 				rules := RoutingRules(st)
+				apiTag := ""
+				if apiCfg, ok := templ["api"].(map[string]any); ok {
+					apiTag = s(apiCfg["tag"])
+				}
 				for _, v := range a(rt["rules"]) {
 					if rr, ok := v.(map[string]any); ok {
+						// 3x-ui injects an internal control-plane route such as api -> api.
+						// L-UI does not run 3x-ui's API application/inbound, so carrying this
+						// rule over creates a dangling outboundTag and makes xray -test fail.
+						if apiTag != "" && s(rr["outboundTag"]) == apiTag && contains(strSlice(rr["inboundTag"]), apiTag) {
+							warn("已忽略 3x-ui 内部 API 路由规则（L-UI 不使用 3x-ui API 控制面）")
+							continue
+						}
 						cp := DeepCopy(rr)
-						cp["_lui_enabled"] = true
+						cp["_lui_enabled"] = b(rr["enabled"], true)
+						cp["_lui_source"] = "3x-ui"
+						delete(cp, "enabled")
 						rules = append(rules, cp)
 						report["routing_rules"] = i(report["routing_rules"]) + 1
 					}
