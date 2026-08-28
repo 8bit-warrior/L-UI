@@ -9,13 +9,15 @@ import (
 	"testing"
 )
 
-func TestConvert3xuiFiltersInternalAPIRoute(t *testing.T) {
+func open3xuiAPIRouteFixture(t *testing.T) *sql.DB {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil || db.Ping() != nil {
 		t.Skip("sqlite driver unavailable")
 	}
-	defer db.Close()
+	db.SetMaxOpenConns(1)
 	if _, err = db.Exec(`CREATE TABLE settings (key TEXT, value TEXT)`); err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
 	templ := map[string]any{
@@ -34,8 +36,15 @@ func TestConvert3xuiFiltersInternalAPIRoute(t *testing.T) {
 	}
 	raw, _ := json.Marshal(templ)
 	if _, err = db.Exec(`INSERT INTO settings(key,value) VALUES('xrayTemplateConfig', ?)`, string(raw)); err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
+	return db
+}
+
+func TestConvert3xuiFiltersInternalAPIRoute(t *testing.T) {
+	db := open3xuiAPIRouteFixture(t)
+	defer db.Close()
 	st := DefaultState(testPaths(t))
 	next, report, err := Convert3xui(db, st, "overwrite")
 	if err != nil {
@@ -64,6 +73,39 @@ func TestConvert3xuiFiltersInternalAPIRoute(t *testing.T) {
 		if s(rr["outboundTag"]) == "api" || contains(strSlice(rr["inboundTag"]), "api") {
 			t.Fatalf("3x-ui control-plane route leaked into Xray config: %#v", rr)
 		}
+	}
+}
+
+func TestImported3xuiConfigPassesRealXray(t *testing.T) {
+	xrayBin := os.Getenv("LUI_REAL_XRAY_BIN")
+	if xrayBin == "" {
+		t.Skip("LUI_REAL_XRAY_BIN is not set")
+	}
+	db := open3xuiAPIRouteFixture(t)
+	defer db.Close()
+	p := testPaths(t)
+	st := DefaultState(p)
+	st.Log = map[string]any{"loglevel": "warning"}
+	next, _, err := Convert3xui(db, st, "overwrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := BuildConfig(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(p.Home, "real-xray-import.json")
+	if err := os.WriteFile(configPath, append(raw, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p.XrayBin = xrayBin
+	ok, msg := ValidateXrayConfig(p, configPath)
+	if !ok {
+		t.Fatalf("official Xray rejected sanitized imported config: %s", msg)
 	}
 }
 
